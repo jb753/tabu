@@ -30,7 +30,6 @@ def add_short(X,x):
     return X
 
 def add_med(X, Y, XYopt):
-
     # Split args
     Xopt, Yopt = XYopt
 
@@ -59,7 +58,6 @@ def add_med(X, Y, XYopt):
     return (Xm, Ym), flag
 
 def add_long(X, Y, X_long, Y_long):
-
     # Only add unique points
     i, il = find_rows(X, X_long)
     X = X[~i]
@@ -93,9 +91,49 @@ def find_rows(A,B):
 
     return ind_A, ind_B
 
+def sample_long(XY, nregion):
+    """Return a point in under-explored region of design space."""
+
+    X = XY[0]
+
+    # Loop over each variable
+    xnew = np.empty((1,M))
+    for m in range(M):
+
+        # Bin the design variables
+        hX, bX = np.histogram(X[:,m], nregion)
+
+        # Random value in least-visited bin
+        imin = hX.argmin()
+        bnds = bX[imin:imin+2]
+        xnew[0,m] = np.random.uniform(*bnds)
+
+    return xnew
+
+def sample_front(XY, nregion):
+    """Return a point in under-explored region of Pareto front."""
+
+    Y = XY[1]
+    X = XY[0]
+
+    # Arbitrarily bin using the first objective
+    hY, bY = np.histogram(Y[:,0], nregion)
+
+    # Select least-visited bin
+    imin = hY.argmin()
+    bnds = bY[imin:imin+2]
+
+    # Select a random point in this bin
+    Xb = X[np.logical_and( Y[:,0] > bnds[0] , Y[:,0] <= bnds[1])]
+    xnew = Xb[np.random.choice(Xb.shape[0])]
+
+    return xnew
+
 if __name__=="__main__":
 
     n_short = 20
+    n_region = 2
+    n_region_front = 5
     M = 2
     N = 2
     diversify = 10
@@ -124,6 +162,7 @@ if __name__=="__main__":
     # Main loop until step sizes smaller than a tolerance
     niter = 0
     maxiter = np.Inf
+    fevals = 0
     while np.any( dx > dx_tol) and niter < maxiter:
 
         niter += 1
@@ -146,6 +185,7 @@ if __name__=="__main__":
         # Evaluate objective for unseen points
         Y[ind_X] = XY_long[1][ind_X_long]
         Y[~ind_X] = objective(X[~ind_X])
+        fevals += np.sum(~ind_X)
 
         # Put new results into long-term memory
         XY_long = add_long(X, Y, *XY_long)
@@ -206,7 +246,7 @@ if __name__=="__main__":
         if i_local == diversify:
             # print('Diversifying')
             # Random selection from long-term memory
-            x1 = sample_mem(XY_long)
+            x1 = sample_long(XY_long, n_region)
         elif i_local == intensify:
             # print('Intensifying')
             # Random selection from intesification memory
@@ -215,7 +255,7 @@ if __name__=="__main__":
             # print('Restarting')
             # Reduce step sizes and randomly select from medium-term
             dx = dx/2.
-            x1 = sample_mem(XY_med)
+            x1 = sample_front(XY_med, n_region_front)
             i_local = 0
 
         # Add chosen point to short-term list (tabu)
@@ -225,10 +265,9 @@ if __name__=="__main__":
         x0 = x1
 
 
+    print('%d evals' % fevals)
     print(XY_med[0].shape)
     print(XY_long[0].shape)
-    X_long_unique = np.unique(XY_long[0],axis=0)
-    print(X_long_unique.shape)
     f, a = plt.subplots()
     a.plot(*XY_long[1].T,'.')
     a.plot(*XY_med[1].T,'o')
