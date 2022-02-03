@@ -53,30 +53,17 @@ def add_med(X, Y, XYopt):
     Ym = np.concatenate((Y[b_new_self],Yopt[b_old]))
     Xm = np.concatenate((X[b_new_self],Xopt[b_old]))
 
-    # print('add_med')
-    # print('before')
-    # print(Yopt)
-    # print('canditates')
-    # print(Y)
-    # print('after')
-    # print(Ym)
-
     # Flag is true if we added new point
     flag = np.sum(b_new_self)>0
-    # print(flag)
 
     return (Xm, Ym), flag
 
 def add_long(X, Y, X_long, Y_long):
 
-    # # # Filter against existing inputs
-    # print('add_long')
-    # print(X)
-    # print(X_long)
-    # b_filter = ~np.isin(X,X_long)
-    # print(b_filter)
-    # # X = X[b_filter]
-    # # Y = Y[b_filter]
+    # Only add unique points
+    i, il = find_rows(X, X_long)
+    X = X[~i]
+    Y = Y[~i]
 
     # Return combination
     X_new = np.append(X_long, X, axis=0)
@@ -88,20 +75,39 @@ def sample_mem(XY):
     X = XY[0]
     return X[np.random.choice(X.shape[0],1)]
 
+def find_rows(A,B):
+    """Get matching rows in matrices A and B.
+
+    Return two indices iA and iB such that matched rows are A[iA] and B[iB]."""
+
+    # Arrange the A points along a new dimension
+    A1 = np.expand_dims(A,1)
+
+    # NA by NB mem logical where all elements match
+    b = (A1==B).all(axis=-1)
+
+    # A index is True where it matches any of the B points
+    ind_A = b.any(axis=1)
+    # Vice versa for B indec
+    ind_B = b.any(axis=0)
+
+    return ind_A, ind_B
 
 if __name__=="__main__":
 
     n_short = 20
     M = 2
+    N = 2
     diversify = 10
-    intensify = 30
+    intensify = 20
     restart = 50
+    n_pattern = 2
 
     x0 = np.atleast_2d([0.5,2.])
     y0 = objective(x0)
 
     dx = np.array([.1,.5])
-    dx_tol = dx/100.
+    dx_tol = dx/64.
 
     # Short term memory only needs to store input x
     X_short = np.nan*np.ones((n_short, M))
@@ -117,7 +123,7 @@ if __name__=="__main__":
 
     # Main loop until step sizes smaller than a tolerance
     niter = 0
-    maxiter = 20000
+    maxiter = np.Inf
     while np.any( dx > dx_tol) and niter < maxiter:
 
         niter += 1
@@ -129,10 +135,17 @@ if __name__=="__main__":
         X = X[constrain_input(X)]
 
         # Filter against short term memory
-        X = X[~np.isin(X,X_short).all(axis=1)]
+        X = X[~find_rows(X,X_short)[0]]
 
-        # Evaluate objective
-        Y = objective(X)
+        # Re-use previous objectives from long-term mem if possible
+        Y = np.nan*np.ones((X.shape[0], N))
+
+        # Indexes for candidate points 
+        ind_X, ind_X_long = find_rows(X, XY_long[0])
+
+        # Evaluate objective for unseen points
+        Y[ind_X] = XY_long[1][ind_X_long]
+        Y[~ind_X] = objective(X[~ind_X])
 
         # Put new results into long-term memory
         XY_long = add_long(X, Y, *XY_long)
@@ -164,46 +177,61 @@ if __name__=="__main__":
             # Randomly choose from multiple dominating points
             np.random.shuffle(i_dom)
             x1 = X[i_dom[0]]
+            y1 = Y[i_dom[0]]
             # Put spare points into intensification memory
             XY_int, _ = add_med(X[i_dom[1:]], Y[i_dom[1:]], XY_int)
         elif len(i_equiv)>0:
             # Randomly choose from equivalent points
             np.random.shuffle(i_equiv)
             x1 = X[i_equiv[0]]
+            y1 = Y[i_equiv[0]]
         elif len(i_non_dom)>0:
             # Randomly choose from non-dominating points
             np.random.shuffle(i_non_dom)
             x1 = X[i_non_dom[0]]
+            y1 = Y[i_non_dom[0]]
 
         x1 = np.atleast_2d(x1)
+        y1 = np.atleast_2d(y1)
 
-        # Add chosen point to short-term list (tabu)
-        X_short = add_short(X_short, x1)
+        # Test for pattern move
+        if np.mod(niter,n_pattern):
+            x1a = x0 + 2.*(x1-x0)
+            y1a = objective(x1a)
+            if (y1a<y1).all():
+                # print('Pattern move')
+                x1 = x1a
 
         # Choose next point based on local search counter
         if i_local == diversify:
-            print('Diversifying')
+            # print('Diversifying')
             # Random selection from long-term memory
             x1 = sample_mem(XY_long)
         elif i_local == intensify:
-            print('Intensifying')
+            # print('Intensifying')
             # Random selection from intesification memory
             x1 = sample_mem(XY_int)
         elif i_local == restart:
-            print('Restarting')
+            # print('Restarting')
             # Reduce step sizes and randomly select from medium-term
             dx = dx/2.
             x1 = sample_mem(XY_med)
             i_local = 0
 
+        # Add chosen point to short-term list (tabu)
+        X_short = add_short(X_short, x1)
+
         # Update current point before next iteration
         x0 = x1
 
+
     print(XY_med[0].shape)
     print(XY_long[0].shape)
+    X_long_unique = np.unique(XY_long[0],axis=0)
+    print(X_long_unique.shape)
     f, a = plt.subplots()
-    a.plot(*XY_med[1].T,'o')
     a.plot(*XY_long[1].T,'.')
+    a.plot(*XY_med[1].T,'o')
     a.set_xlim((0.1,1.))
     a.set_ylim((0.,10.))
     plt.show()
