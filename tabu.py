@@ -140,7 +140,7 @@ def sample_front(XY, nregion):
 
 class Memory:
 
-    def __init__(self, nx, ny, max_points=np.Inf):
+    def __init__(self, nx, ny, max_points):
         """Store a set of design vectors and their objective functions."""
 
         # Record inputs
@@ -155,8 +155,11 @@ class Memory:
         self.X = np.empty((max_points, nx))
         self.Y = np.empty((max_points, ny))
 
-    def add(self, xa, ya):
+    def add(self, xa, ya=None):
         """Add a point to the memory."""
+        if ya is None:
+            ya=xa
+
         # Only add new points
         i_new = ~self.contains(xa)
         n_new = np.sum(i_new)
@@ -179,7 +182,7 @@ class Memory:
         else:
             return np.zeros((Xtest.shape[0],),dtype=bool)
 
-    def lookup_Y(self, Xtest):
+    def lookup(self, Xtest):
         """Return objective function for design vector already in mem."""
 
         # Check that the requested points really are available
@@ -252,29 +255,20 @@ class Memory:
 
         return xnew
 
+
     def sample_random(self):
         """Choose a random design point from the memory."""
         return self.X[np.random.choice(self.npts,1)]
 
 if __name__=="__main__":
 
-    mem = Memory( 2, 2, 50)
-    x0 = np.atleast_2d([0.5,2.])
-    y0 = np.atleast_2d([0.5,2.])
-    for n in range(10):
-        x0 = np.atleast_2d(np.random.rand(1,2))
-        y0 = np.atleast_2d(np.random.rand(1,2))
-        mem.update_front(x0, y0)
-
-    print(mem.generate_sparse(2))
-    print(mem.sample_random())
-    quit()
-
     n_short = 20
+    n_med = 1000
+    n_long = 2000
+
     n_region = 2
-    n_region_front = 5
-    M = 2
-    N = 2
+    nx = 2
+    ny = 2
     diversify = 10
     intensify = 20
     restart = 50
@@ -287,13 +281,13 @@ if __name__=="__main__":
     dx_tol = dx/64.
 
     # Short term memory only needs to store input x
-    X_short = np.nan*np.ones((n_short, M))
-    X_short[0,:] = x0
+    mem_short = Memory(nx, ny, n_short)
+    mem_med = Memory(nx, ny, n_med)
+    mem_long = Memory(nx, ny, n_long)
+    mem_int = Memory(nx, ny, n_long)
 
-    # Medium and long memories need x and y
-    XY_med = (x0, y0)
-    XY_long = (x0, y0)
-    XY_int = (x0, y0)
+    for mem in (mem_short, mem_long, mem_int):
+        mem.add(x0, y0)
 
     # Initialise local index
     i_local = 0
@@ -302,7 +296,7 @@ if __name__=="__main__":
     niter = 0
     maxiter = np.Inf
     fevals = 0
-    while np.any( dx > dx_tol) and niter < maxiter:
+    while np.any( dx > dx_tol):
 
         niter += 1
 
@@ -313,25 +307,25 @@ if __name__=="__main__":
         X = X[constrain_input(X)]
 
         # Filter against short term memory
-        X = X[~find_rows(X,X_short)[0]]
+        X = X[~mem_short.contains(X)]
 
         # Re-use previous objectives from long-term mem if possible
-        Y = np.nan*np.ones((X.shape[0], N))
+        Y = np.nan*np.ones((X.shape[0], ny))
 
         # Indexes for candidate points 
-        ind_X, ind_X_long = find_rows(X, XY_long[0])
+        ind_seen = mem_long.contains(X)
 
         # Evaluate objective for unseen points
-        Y[ind_X] = XY_long[1][ind_X_long]
-        Y[~ind_X] = objective(X[~ind_X])
-        fevals += np.sum(~ind_X)
+        Y[ind_seen] = mem_long.lookup(X[ind_seen])
+        Y[~ind_seen] = objective(X[~ind_seen])
+        fevals += np.sum(~ind_seen)
 
         # Put new results into long-term memory
-        XY_long = add_long(X, Y, *XY_long)
+        mem_long.add(X, Y)
 
         # Put Pareto-equivalent results into medium-term memory
         # Flag true if we sucessfully added a point
-        XY_med, flag = add_med(X, Y, XY_med)
+        flag = mem_med.update_front(X, Y)
 
         # If we did not add to medium memory, increment local search counter
         if flag:
@@ -358,7 +352,7 @@ if __name__=="__main__":
             x1 = X[i_dom[0]]
             y1 = Y[i_dom[0]]
             # Put spare points into intensification memory
-            XY_int, _ = add_med(X[i_dom[1:]], Y[i_dom[1:]], XY_int)
+            mem_int.add(X[i_dom[1:]], Y[i_dom[1:]])
         elif len(i_equiv)>0:
             # Randomly choose from equivalent points
             np.random.shuffle(i_equiv)
@@ -384,32 +378,30 @@ if __name__=="__main__":
         # Choose next point based on local search counter
         if i_local == diversify:
             # print('Diversifying')
-            # Random selection from long-term memory
-            x1 = sample_long(XY_long, n_region)
+            x1 = mem_long.generate_sparse(n_region)
         elif i_local == intensify:
             # print('Intensifying')
-            # Random selection from intesification memory
-            x1 = sample_mem(XY_int)
+            x1 = mem_int.sample_random()
         elif i_local == restart:
             # print('Restarting')
             # Reduce step sizes and randomly select from medium-term
             dx = dx/2.
-            x1 = sample_front(XY_med, n_region_front)
+            x1 = mem_med.sample_random()
             i_local = 0
 
         # Add chosen point to short-term list (tabu)
-        X_short = add_short(X_short, x1)
+        mem_short.add(x1)
 
         # Update current point before next iteration
         x0 = x1
 
 
     print('%d evals' % fevals)
-    print(XY_med[0].shape)
-    print(XY_long[0].shape)
+    print(mem_med.npts)
+    print(mem_long.npts)
     f, a = plt.subplots()
-    a.plot(*XY_long[1].T,'.')
-    a.plot(*XY_med[1].T,'o')
+    a.plot(mem_long.Y[:mem_long.npts,0],mem_long.Y[:mem_long.npts,1],'.')
+    a.plot(mem_med.Y[:mem_med.npts,0],mem_med.Y[:mem_med.npts,1],'o')
     a.set_xlim((0.1,1.))
     a.set_ylim((0.,10.))
     plt.show()
