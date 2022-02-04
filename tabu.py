@@ -9,27 +9,20 @@ def hj_move(x, dx):
     having being perturbed by elementwise +/- dx."""
     return x + np.concatenate((np.diag(dx),np.diag(-dx)))
 
-# def objective(x):
-#     return np.stack((x[:,0], (1.+x[:,1])/x[:,0]),axis=1)
-
-# def constrain_input(x):
-#     return np.all(
-#         (
-#             x[:,1]+9.*x[:,0]>=6.,
-#             -x[:,1]+9.*x[:,0]>=1.,
-#             x[:,0]>=0.,
-#             x[:,0]<=1.0,
-#             x[:,1]>=0.,
-#             x[:,1]<=5.,
-#         )
-#         ,axis=0)
-
 def objective(x):
-    # return np.atleast_2d(np.sum(x**2.,axis=1,keepdims=True))
-    return np.atleast_2d(x[:,(0,)]**2. * ( (x[:,(1,)] - 1.)**2. + (x[:,(1,)] - 3.)**2. + x[:,(1,)]))
+    return np.stack((x[:,0], (1.+x[:,1])/x[:,0]),axis=1)
 
 def constrain_input(x):
-    return np.all( np.abs(x)< 10. ,axis=1)
+    return np.all(
+        (
+            x[:,1]+9.*x[:,0]>=6.,
+            -x[:,1]+9.*x[:,0]>=1.,
+            x[:,0]>=0.,
+            x[:,0]<=1.0,
+            x[:,1]>=0.,
+            x[:,1]<=5.,
+        )
+        ,axis=0)
 
 def add_short(X,x):
     X = np.roll(X,1,axis=0)
@@ -39,8 +32,6 @@ def add_short(X,x):
 def add_med(X, Y, XYopt):
     # Split args
     Xopt, Yopt = XYopt
-
-    # TODO - keep a list of points if objective is scalar
 
     # Arrange the test points along a new dimension
     Y1 = np.expand_dims(Y,1)
@@ -57,35 +48,12 @@ def add_med(X, Y, XYopt):
     # We only want new points that are non-dominated
     b_new_self = np.logical_and(b_new,b_self)
 
+    # Return non-dominated points from both sets
+    Ym = np.concatenate((Y[b_new_self],Yopt[b_old]))
+    Xm = np.concatenate((X[b_new_self],Xopt[b_old]))
+
     # Flag is true if we added new point
-    n_new = np.sum(b_new_self)
-    flag = n_new > 0
-
-    if not flag:
-        return (Xopt, Yopt), flag
-
-    if Yopt.shape[1] == 1:
-        # For scalar objectives, keep a ranked list of points
-
-        # Shift all values down, throwing out worst points if sorted
-        Yopt[n_new:] = Yopt[:-n_new]
-        Xopt[n_new:] = Xopt[:-n_new]
-
-        # Add new points
-        print('opt')
-        print(Yopt)
-        Yopt[:n_new] = Y[b_new_self]
-        Xopt[:n_new] = X[b_new_self]
-
-        # Sort by objective
-        Xm = Xopt
-        Ym = Yopt
-
-
-    else:
-        # For multiple objectives, return non-dominated points from both sets
-        Ym = np.concatenate((Y[b_new_self],Yopt[b_old]))
-        Xm = np.concatenate((X[b_new_self],Xopt[b_old]))
+    flag = np.sum(b_new_self)>0
 
     return (Xm, Ym), flag
 
@@ -157,53 +125,36 @@ def sample_front(XY, nregion):
 
     # Select a random point in this bin
     Xb = X[np.logical_and( Y[:,0] > bnds[0] , Y[:,0] <= bnds[1])]
-    try:
-        xnew = Xb[np.random.choice(Xb.shape[0])]
-    except ValueError:
-        # Fall back to global random
-        xnew = X[np.random.choice(X.shape[0])]
+    xnew = Xb[np.random.choice(Xb.shape[0])]
 
     return xnew
 
-def blank_memory(n,M,N,x0,y0):
-    X = big*np.ones((n, M))
-    Y = big*np.ones((n, N))
-    X[0] = x0
-    Y[0] = y0
-    return X, Y
-
-
 if __name__=="__main__":
 
-    big = 1e9
     n_short = 20
     n_region = 2
-    n_region_front = 2
-    n_med = 20
+    n_region_front = 5
     M = 2
-    N = 1
-    diversify = 5
+    N = 2
+    diversify = 10
     intensify = 20
     restart = 50
     n_pattern = 2
 
     x0 = np.atleast_2d([0.5,2.])
-    x0 = np.atleast_2d([0.5,3.5])
     y0 = objective(x0)
 
     dx = np.array([.1,.5])
-    dx = np.array([.2,.2])
     dx_tol = dx/64.
 
     # Short term memory only needs to store input x
-    X_short, _ = blank_memory(n_short, M, N, x0, y0)
+    X_short = np.nan*np.ones((n_short, M))
     X_short[0,:] = x0
 
     # Medium and long memories need x and y
     XY_med = (x0, y0)
-    XY_med = blank_memory(n_med, M, N, x0, y0)
     XY_long = (x0, y0)
-    XY_int = blank_memory(n_med, M, N, x0, y0)
+    XY_int = (x0, y0)
 
     # Initialise local index
     i_local = 0
@@ -212,7 +163,7 @@ if __name__=="__main__":
     niter = 0
     maxiter = np.Inf
     fevals = 0
-    while np.any( dx > dx_tol): 
+    while np.any( dx > dx_tol) and niter < maxiter:
 
         niter += 1
 
@@ -222,7 +173,6 @@ if __name__=="__main__":
         # Filter by input constraints
         X = X[constrain_input(X)]
 
-
         # Filter against short term memory
         X = X[~find_rows(X,X_short)[0]]
 
@@ -231,7 +181,6 @@ if __name__=="__main__":
 
         # Indexes for candidate points 
         ind_X, ind_X_long = find_rows(X, XY_long[0])
-
 
         # Evaluate objective for unseen points
         Y[ind_X] = XY_long[1][ind_X_long]
@@ -301,13 +250,10 @@ if __name__=="__main__":
         elif i_local == intensify:
             # print('Intensifying')
             # Random selection from intesification memory
-            if N>1:
-                x1 = sample_mem(XY_int)
-            else:
-                x1 = sample_front(XY_med, n_region_front)
+            x1 = sample_mem(XY_int)
         elif i_local == restart:
             # print('Restarting')
-            # Reduce step sizes and select from medium-term
+            # Reduce step sizes and randomly select from medium-term
             dx = dx/2.
             x1 = sample_front(XY_med, n_region_front)
             i_local = 0
@@ -319,25 +265,12 @@ if __name__=="__main__":
         x0 = x1
 
 
-    # Trim the medium term memory of dummy points
-    i_big, _ = find_rows(XY_med[1], big*np.ones_like(y1))
-    XY_med = [xyi[~i_big] for xyi in XY_med]
-
-    print(x0)
-
-    print(XY_med[0].shape)
     print('%d evals' % fevals)
+    print(XY_med[0].shape)
+    print(XY_long[0].shape)
     f, a = plt.subplots()
-    a.tricontourf(XY_long[0][:,0], XY_long[0][:,1], XY_long[1][:,0])
-    a.plot(XY_med[0][:,0],XY_med[0][:,1],'o-')
-    # a.set_xlim((0.1,1.))
-    # a.set_ylim((0.,10.))
+    a.plot(*XY_long[1].T,'.')
+    a.plot(*XY_med[1].T,'o')
+    a.set_xlim((0.1,1.))
+    a.set_ylim((0.,10.))
     plt.show()
-
-#     print('%d evals' % fevals)
-#     f, a = plt.subplots()
-#     a.plot(*XY_long[1].T,'.')
-#     a.plot(*XY_med[1].T,'o')
-#     # a.set_xlim((0.1,1.))
-#     # a.set_ylim((0.,10.))
-#     plt.show()
