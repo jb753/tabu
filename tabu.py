@@ -76,7 +76,9 @@ def sample_mem(XY):
 def find_rows(A,B):
     """Get matching rows in matrices A and B.
 
-    Return two indices iA and iB such that matched rows are A[iA] and B[iB]."""
+    Return:
+        logical same shape as A, True where A is in B
+        indices same shape as A, of the first found row in B for each A row."""
 
     # Arrange the A points along a new dimension
     A1 = np.expand_dims(A,1)
@@ -84,12 +86,19 @@ def find_rows(A,B):
     # NA by NB mem logical where all elements match
     b = (A1==B).all(axis=-1)
 
+    # Lay out index arrays
+    jA, jB = np.meshgrid(range(A.shape[0]),range(B.shape[0]),indexing='ij')
+
     # A index is True where it matches any of the B points
     ind_A = b.any(axis=1)
-    # Vice versa for B indec
-    ind_B = b.any(axis=0)
 
-    return ind_A, ind_B
+    # Use argmax to find first True along each row
+    loc_B = np.argmax(b,axis=1)
+
+    # Where there are no matches, override to a sentinel value -1
+    loc_B[~ind_A] = -1
+
+    return ind_A, loc_B
 
 def sample_long(XY, nregion):
     """Return a point in under-explored region of design space."""
@@ -129,7 +138,137 @@ def sample_front(XY, nregion):
 
     return xnew
 
+class Memory:
+
+    def __init__(self, nx, ny, max_points=np.Inf):
+        """Store a set of design vectors and their objective functions."""
+
+        # Record inputs
+        self.nx = nx
+        self.ny = ny
+        self.max_points = max_points
+
+        # Initialise points counter
+        self.npts = 0
+
+        # Preallocate matrices for design vectors and objectives
+        self.X = np.empty((max_points, nx))
+        self.Y = np.empty((max_points, ny))
+
+    def add(self, xa, ya):
+        """Add a point to the memory."""
+        # Only add new points
+        i_new = ~self.contains(xa)
+        n_new = np.sum(i_new)
+        xa = xa[i_new]
+        ya = ya[i_new]
+
+        # Roll downwards and overwrite
+        self.X = np.roll(self.X,n_new,axis=0)
+        self.X[:n_new,:] = xa
+        self.Y = np.roll(self.Y,n_new,axis=0)
+        self.Y[:n_new,:] = ya
+
+        # Update points counter
+        self.npts = np.min((self.max_points, self.npts+n_new))
+
+    def contains(self, Xtest):
+        """Boolean index for each row in Xtest, True if x already in memory."""
+        if self.npts:
+            return find_rows(Xtest, self.X[:self.npts])[0]
+        else:
+            return np.zeros((Xtest.shape[0],),dtype=bool)
+
+    def lookup_Y(self, Xtest):
+        """Return objective function for design vector already in mem."""
+
+        # Check that the requested points really are available
+        if np.any(~self.contains(Xtest)):
+            raise ValueError('The requested points have not been previously evaluated')
+
+        return self.Y[:self.npts][find_rows(Xtest, self.X[:self.npts])[1]]
+
+    def delete(self, ind_del):
+        """Remove points at given indexes."""
+
+        # Set up boolean mask for points to keep
+        b = np.ones((self.npts,),dtype=bool)
+        b[ind_del] = False
+        n_keep = np.sum(b)
+
+        # Reindex everything so that spaces appear at the end of memory
+        self.X[:n_keep] = self.X[:self.npts][b]
+        self.Y[:n_keep] = self.Y[:self.npts][b]
+
+        # Update number of points
+        self.npts = n_keep
+
+
+    def update_front(self, X, Y):
+        """Add or remove test points to maintain a Pareto front."""
+        Yopt = self.Y[:self.npts]
+
+        # Arrange the test points along a new dimension
+        Y1 = np.expand_dims(Y,1)
+
+        # False where an old point is dominated by a new point
+        b_old = ~(Y1<Yopt).all(axis=-1).any(axis=0)
+
+        # False where a new point is dominated by an old point
+        b_new = ~(Y1>=Yopt).all(axis=-1).any(axis=1)
+
+        # False where a new point is dominated by a new point
+        b_self = ~(Y1>Y).all(axis=-1).any(axis=1)
+
+        # We only want new points that are non-dominated
+        b_new_self = np.logical_and(b_new,b_self)
+
+        # Delete old points that are now dominated by new points
+        self.delete(~b_old)
+
+        # Add new points
+        self.add(X[b_new_self], Y[b_new_self])
+
+        # Flag is true if we added new points
+        flag = np.sum(b_new_self)>0
+
+        return flag
+
+
+    def generate_sparse(self, nregion):
+        """Return a random design vector in a underexplored region."""
+
+        # Loop over each variable
+        xnew = np.empty((1,self.nx))
+        for i in range(self.nx):
+
+            # Bin the design variable
+            hX, bX = np.histogram(self.X[:self.npts,i], nregion)
+
+            # Random value in least-visited bin
+            bin_min = hX.argmin()
+            bnds = bX[bin_min:bin_min+2]
+            xnew[0,i] = np.random.uniform(*bnds)
+
+        return xnew
+
+    def sample_random(self):
+        """Choose a random design point from the memory."""
+        return self.X[np.random.choice(self.npts,1)]
+
 if __name__=="__main__":
+
+    mem = Memory( 2, 2, 50)
+    x0 = np.atleast_2d([0.5,2.])
+    y0 = np.atleast_2d([0.5,2.])
+    for n in range(10):
+        x0 = np.atleast_2d(np.random.rand(1,2))
+        y0 = np.atleast_2d(np.random.rand(1,2))
+        mem.update_front(x0, y0)
+
+    print(mem.generate_sparse(2))
+    print(mem.sample_random())
+    quit()
 
     n_short = 20
     n_region = 2
