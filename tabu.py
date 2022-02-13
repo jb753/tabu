@@ -185,7 +185,9 @@ class Memory:
 
     def sample_random(self):
         """Choose a random design point from the memory."""
-        return self._X[np.random.choice(self.npts, 1)]
+        i_select = np.random.choice(self.npts, 1)
+        return self._X[i_select], self._Y[i_select]
+
     def clear(self):
         """Erase all points in memory."""
         self.npts = 0
@@ -213,7 +215,7 @@ class TabuSearch:
 
         # Misc algorithm parameters
         self.x_regions = 2
-        self.max_fevals = 1000
+        self.max_fevals = 2000
         self.fac_restart = 0.5
         self.fac_pattern = 2.0
 
@@ -226,7 +228,6 @@ class TabuSearch:
         self.mem_long = Memory(nx, ny, self.n_long)
         self.mem_int = Memory(nx, ny, self.n_med)
         self.mem_all = (self.mem_short, self.mem_med, self.mem_long, self.mem_int)
-
 
     def clear_memories(self):
         """Erase all memories"""
@@ -260,7 +261,9 @@ class TabuSearch:
 
         # Evaluate objective for unseen points
         Y[~ind_seen] = self.objective(X[~ind_seen])
-        # self.fevals += np.sum(~ind_seen)
+
+        # Increment function evaluation counter
+        self.fevals += np.sum(~ind_seen)
 
         return X, Y
 
@@ -299,8 +302,9 @@ class TabuSearch:
 
         # Keep in matrix form
         x1 = np.atleast_2d(x1)
+        y1 = np.atleast_2d(y1)
 
-        return x1
+        return x1, y1
 
     def pattern_move(self, x0, y0, x1, y1):
         """If this move is in a good direction, increase move length."""
@@ -311,16 +315,13 @@ class TabuSearch:
         else:
             return x1
 
-    def search(self, x0, dx):
+    def search(self, x0, dx, dx_min):
         """Perform a search with given intial point and step size."""
 
         y0 = ts.initial_guess(x0)
 
         i = 0
-        while self.fevals < self.max_fevals:
-
-            print('x %s' % x0)
-            print('y %s' % y0)
+        while self.fevals < self.max_fevals and np.any(dx>dx_min):
 
             # Evaluate objective for all permissible candidate moves
             X, Y  = ts.evaluate_moves(x0, dx)
@@ -339,28 +340,30 @@ class TabuSearch:
                 i += 1
 
             # Choose next point based on local search counter
-            if i == self.i_diversify:
-                print('Diversifying')
-                x1 = self.mem_long.generate_sparse(self.x_regions)
-            elif i == self.i_intensify:
-                print('Intensifying')
-                x1 = self.mem_int.sample_random()
-            elif i == self.i_restart:
-                print('Restarting')
+            if i == self.i_restart:
                 # Reduce step sizes and randomly select from medium-term
                 dx = dx * self.fac_restart
-                x1 = self.mem_med.sample_random()
+                x1, y1 = self.mem_med.sample_random()
                 i = 0
+            elif i == self.i_intensify:
+                x1, y1 = self.mem_int.sample_random()
+            elif i == self.i_diversify or X.shape[0]==0:
+                # Generate a new point in sparse design region, 
+                # If we have reached i_diversify or all moves are tabu
+                x1 = self.mem_long.generate_sparse(self.x_regions)
+                y1 = self.objective(x1)
             else:
-                x1 = ts.select_move(x0, y0, X, Y)
-                # if np.mod(i, self.i_pattern):
-                #     x1 = ts.pattern_move(x0, y0, x1, y1)
+                # Normally, choose the best candidate move
+                x1, y1 = ts.select_move(x0, y0, X, Y)
+                # Check for a pattern move every i_pattern steps
+                if np.mod(i, self.i_pattern):
+                    x1 = ts.pattern_move(x0, y0, x1, y1)
 
             # Add chosen point to short-term list (tabu)
             self.mem_short.add(x1)
 
             # Update current point before next iteration
-            x0 = x1
+            x0, y0 = x1, y1
 
 
 if __name__ == "__main__":
@@ -368,22 +371,16 @@ if __name__ == "__main__":
     ts = TabuSearch(objective, constrain_input, 2, 2)
 
     x0 = np.atleast_2d([0.5, 2.0])
-    dx = np.array([0.1, 0.1])
-
-    ts.search(x0, dx)
-
-    quit()
-
-
     dx = np.array([0.1, 0.5])
-    dx_tol = dx / 64.0
 
-    print("%d evals" % fevals)
-    print(mem_med.npts)
-    print(mem_long.npts)
+    ts.search(x0, dx, dx/64.)
+
+    print("%d evals" % ts.fevals)
+    print(ts.mem_med.npts)
+    print(ts.mem_long.npts)
     f, a = plt.subplots()
-    a.plot(mem_long.Y[:, 0], mem_long.Y[:, 1], ".")
-    a.plot(mem_med.Y[:, 0], mem_med.Y[:, 1], "o")
+    a.plot(ts.mem_long.Y[:, 0], ts.mem_long.Y[:, 1], ".")
+    a.plot(ts.mem_med.Y[:, 0], ts.mem_med.Y[:, 1], "o")
     a.set_xlim((0.1, 1.0))
     a.set_ylim((0.0, 10.0))
     plt.show()
