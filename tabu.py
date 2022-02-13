@@ -29,7 +29,7 @@ def constrain_input(x):
     )
 
 
-def find_rows(A, B):
+def find_rows(A, B, atol=None):
     """Get matching rows in matrices A and B.
 
     Return:
@@ -40,10 +40,10 @@ def find_rows(A, B):
     A1 = np.expand_dims(A, 1)
 
     # NA by NB mem logical where all elements match
-    b = (A1 == B).all(axis=-1)
-
-    # Lay out index arrays
-    jA, jB = np.meshgrid(range(A.shape[0]), range(B.shape[0]), indexing="ij")
+    if atol:
+        b = np.isclose(A1, B, atol=atol).all(axis=-1)
+    else:
+        b = (A1 == B).all(axis=-1)
 
     # A index is True where it matches any of the B points
     ind_A = b.any(axis=1)
@@ -70,8 +70,27 @@ class Memory:
         self.npts = 0
 
         # Preallocate matrices for design vectors and objectives
-        self.X = np.empty((max_points, nx))
-        self.Y = np.empty((max_points, ny))
+        # Private because the user should not have to deal with empty slots
+        self._X = np.empty((max_points, nx))
+        self._Y = np.empty((max_points, ny))
+
+    # Public read-only properties for X and Y
+    @property
+    def X(self):
+        """The current set of design vectors."""
+        return self._X[: self.npts, :]
+
+    @property
+    def Y(self):
+        """The current set of objective functions."""
+        return self._Y[: self.npts, :]
+
+    def contains(self, Xtest):
+        """Boolean index for each row in Xtest, True if x already in memory."""
+        if self.npts:
+            return find_rows(Xtest, self._X[: self.npts])[0]
+        else:
+            return np.zeros((Xtest.shape[0],), dtype=bool)
 
     def add(self, xa, ya=None):
         """Add a point to the memory."""
@@ -85,20 +104,13 @@ class Memory:
         ya = ya[i_new]
 
         # Roll downwards and overwrite
-        self.X = np.roll(self.X, n_new, axis=0)
-        self.X[:n_new, :] = xa
-        self.Y = np.roll(self.Y, n_new, axis=0)
-        self.Y[:n_new, :] = ya
+        self._X = np.roll(self._X, n_new, axis=0)
+        self._X[:n_new, :] = xa
+        self._Y = np.roll(self._Y, n_new, axis=0)
+        self._Y[:n_new, :] = ya
 
         # Update points counter
         self.npts = np.min((self.max_points, self.npts + n_new))
-
-    def contains(self, Xtest):
-        """Boolean index for each row in Xtest, True if x already in memory."""
-        if self.npts:
-            return find_rows(Xtest, self.X[: self.npts])[0]
-        else:
-            return np.zeros((Xtest.shape[0],), dtype=bool)
 
     def lookup(self, Xtest):
         """Return objective function for design vector already in mem."""
@@ -107,7 +119,7 @@ class Memory:
         if np.any(~self.contains(Xtest)):
             raise ValueError("The requested points have not been previously evaluated")
 
-        return self.Y[: self.npts][find_rows(Xtest, self.X[: self.npts])[1]]
+        return self._Y[: self.npts][find_rows(Xtest, self._X[: self.npts])[1]]
 
     def delete(self, ind_del):
         """Remove points at given indexes."""
@@ -118,15 +130,15 @@ class Memory:
         n_keep = np.sum(b)
 
         # Reindex everything so that spaces appear at the end of memory
-        self.X[:n_keep] = self.X[: self.npts][b]
-        self.Y[:n_keep] = self.Y[: self.npts][b]
+        self._X[:n_keep] = self._X[: self.npts][b]
+        self._Y[:n_keep] = self._Y[: self.npts][b]
 
         # Update number of points
         self.npts = n_keep
 
     def update_front(self, X, Y):
         """Add or remove test points to maintain a Pareto front."""
-        Yopt = self.Y[: self.npts]
+        Yopt = self._Y[: self.npts]
 
         # Arrange the test points along a new dimension
         Y1 = np.expand_dims(Y, 1)
@@ -162,7 +174,7 @@ class Memory:
         for i in range(self.nx):
 
             # Bin the design variable
-            hX, bX = np.histogram(self.X[: self.npts, i], nregion)
+            hX, bX = np.histogram(self._X[: self.npts, i], nregion)
 
             # Random value in least-visited bin
             bin_min = hX.argmin()
@@ -173,81 +185,87 @@ class Memory:
 
     def sample_random(self):
         """Choose a random design point from the memory."""
-        return self.X[np.random.choice(self.npts, 1)]
+        return self._X[np.random.choice(self.npts, 1)]
+    def clear(self):
+        """Erase all points in memory."""
+        self.npts = 0
+
+class TabuSearch:
+    def __init__(self, objective, constraint, nx, ny):
+        """Maximise an objective function using Tabu search."""
+
+        # Store objective and constraint functions
+        self.objective = objective
+        self.constraint = constraint
+
+        # Default memory sizes
+        self.n_short = 20
+        self.n_med = 1000
+        self.n_long = 2000
+        self.nx = nx
+        self.ny = ny
+
+        # Default iteration counters
+        self.i_diversify = 10
+        self.i_intensify = 20
+        self.i_restart = 50
+        self.i_pattern = 2
+
+        # Misc algorithm parameters
+        self.x_regions = 2
+        self.max_fevals = 1000
+        self.fac_restart = 0.5
+        self.fac_pattern = 2.0
+
+        # Initialise counters
+        self.fevals = 0
+
+        # Initialise memories
+        self.mem_short = Memory(nx, ny, self.n_short)
+        self.mem_med = Memory(nx, ny, self.n_med)
+        self.mem_long = Memory(nx, ny, self.n_long)
+        self.mem_int = Memory(nx, ny, self.n_med)
+        self.mem_all = (self.mem_short, self.mem_med, self.mem_long, self.mem_int)
 
 
-if __name__ == "__main__":
+    def clear_memories(self):
+        """Erase all memories"""
+        for mem in self.mem_all:
+            mem.clear()
 
-    n_short = 20
-    n_med = 1000
-    n_long = 2000
+    def initial_guess(self, x0):
+        """Reset memories, set current point, evaluate objective."""
+        self.clear_memories()
+        y0 = objective(x0)
+        for mem in self.mem_all:
+            mem.add(x0, y0)
+        return y0
 
-    n_region = 2
-    nx = 2
-    ny = 2
-    diversify = 10
-    intensify = 20
-    restart = 50
-    n_pattern = 2
-
-    x0 = np.atleast_2d([0.5, 2.0])
-    y0 = objective(x0)
-
-    dx = np.array([0.1, 0.5])
-    dx_tol = dx / 64.0
-
-    # Short term memory only needs to store input x
-    mem_short = Memory(nx, ny, n_short)
-    mem_med = Memory(nx, ny, n_med)
-    mem_long = Memory(nx, ny, n_long)
-    mem_int = Memory(nx, ny, n_long)
-
-    for mem in (mem_short, mem_long, mem_int):
-        mem.add(x0, y0)
-
-    # Initialise local index
-    i_local = 0
-
-    # Main loop until step sizes smaller than a tolerance
-    niter = 0
-    maxiter = np.Inf
-    fevals = 0
-    while np.any(dx > dx_tol):
-
-        niter += 1
+    def evaluate_moves(self, x0, dx):
+        """From a given start point, evaluate permissible candidate moves."""
 
         # Generate candidate moves
         X = hj_move(x0, dx)
 
         # Filter by input constraints
-        X = X[constrain_input(X)]
+        X = X[self.constraint(X)]
 
         # Filter against short term memory
-        X = X[~mem_short.contains(X)]
+        X = X[~self.mem_short.contains(X)]
 
         # Re-use previous objectives from long-term mem if possible
-        Y = np.nan * np.ones((X.shape[0], ny))
-
-        # Indexes for candidate points
-        ind_seen = mem_long.contains(X)
+        Y = np.nan * np.ones((X.shape[0], self.ny))
+        ind_seen = self.mem_long.contains(X)
+        Y[ind_seen] = self.mem_long.lookup(X[ind_seen])
 
         # Evaluate objective for unseen points
-        Y[ind_seen] = mem_long.lookup(X[ind_seen])
-        Y[~ind_seen] = objective(X[~ind_seen])
-        fevals += np.sum(~ind_seen)
+        Y[~ind_seen] = self.objective(X[~ind_seen])
+        # self.fevals += np.sum(~ind_seen)
 
-        # Put new results into long-term memory
-        mem_long.add(X, Y)
+        return X, Y
 
-        # Put Pareto-equivalent results into medium-term memory
-        # Flag true if we sucessfully added a point
-        flag = mem_med.update_front(X, Y)
-
-        # If we did not add to medium memory, increment local search counter
-        if flag:
-            i_local = 0
-        else:
-            i_local += 1
+    def select_move(self, x0, y0, X, Y):
+        """Choose next move given starting point and list of candidate moves."""
 
         # Categorise the candidates for next move with respect to current
         b_dom = (Y < y0).all(axis=1)
@@ -260,64 +278,112 @@ if __name__ == "__main__":
         i_equiv = np.where(b_equiv)[0]
 
         # Choose the next point
-        if len(i_dom) == 1:
-            x1 = X[i_dom]
-        elif len(i_dom) > 1:
-            # Randomly choose from multiple dominating points
+        if len(i_dom) > 0:
+            # If we have dominating points, randomly choose from them
             np.random.shuffle(i_dom)
-            x1 = X[i_dom[0]]
-            y1 = Y[i_dom[0]]
-            # Put spare points into intensification memory
+            x1, y1 = X[i_dom[0]], Y[i_dom[0]]
+            # Put spare dominating points into intensification memory
             # TODO - should this be update_front?
-            mem_int.add(X[i_dom[1:]], Y[i_dom[1:]])
+            if len(i_dom) > 1:
+                self.mem_int.add(X[i_dom[1:]], Y[i_dom[1:]])
         elif len(i_equiv) > 0:
             # Randomly choose from equivalent points
             np.random.shuffle(i_equiv)
-            x1 = X[i_equiv[0]]
-            y1 = Y[i_equiv[0]]
+            x1, y1 = X[i_equiv[0]], Y[i_equiv[0]]
         elif len(i_non_dom) > 0:
             # Randomly choose from non-dominating points
             np.random.shuffle(i_non_dom)
-            x1 = X[i_non_dom[0]]
-            y1 = Y[i_non_dom[0]]
+            x1, y1 = X[i_non_dom[0]], Y[i_non_dom[0]]
+        else:
+            raise Exception('No valid points to pick next move from')
 
+        # Keep in matrix form
         x1 = np.atleast_2d(x1)
-        y1 = np.atleast_2d(y1)
 
-        # Test for pattern move
-        if np.mod(niter, n_pattern):
-            x1a = x0 + 2.0 * (x1 - x0)
-            y1a = objective(x1a)
-            if (y1a < y1).all():
-                # print('Pattern move')
-                x1 = x1a
+        return x1
 
-        # Choose next point based on local search counter
-        if i_local == diversify:
-            # print('Diversifying')
-            x1 = mem_long.generate_sparse(n_region)
-        elif i_local == intensify:
-            # print('Intensifying')
-            x1 = mem_int.sample_random()
-        elif i_local == restart:
-            # print('Restarting')
-            # Reduce step sizes and randomly select from medium-term
-            dx = dx * 0.5
-            x1 = mem_med.sample_random()
-            i_local = 0
+    def pattern_move(self, x0, y0, x1, y1):
+        """If this move is in a good direction, increase move length."""
+        x1a = x0 + self.fac_pattern * (x1 - x0)
+        y1a = self.objective(x1a)
+        if (y1a < y1).all():
+            return x1a
+        else:
+            return x1
 
-        # Add chosen point to short-term list (tabu)
-        mem_short.add(x1)
+    def search(self, x0, dx):
+        """Perform a search with given intial point and step size."""
 
-        # Update current point before next iteration
-        x0 = x1
+        y0 = ts.initial_guess(x0)
+
+        i = 0
+        while self.fevals < self.max_fevals:
+
+            print('x %s' % x0)
+            print('y %s' % y0)
+
+            # Evaluate objective for all permissible candidate moves
+            X, Y  = ts.evaluate_moves(x0, dx)
+
+            # Put new results into long-term memory
+            self.mem_long.add(X, Y)
+
+            # Put Pareto-equivalent results into medium-term memory
+            # Flag true if we sucessfully added a point
+            flag = self.mem_med.update_front(X, Y)
+
+            # If we did not add to medium memory, increment local search counter
+            if flag:
+                i = 0
+            else:
+                i += 1
+
+            # Choose next point based on local search counter
+            if i == self.i_diversify:
+                print('Diversifying')
+                x1 = self.mem_long.generate_sparse(self.x_regions)
+            elif i == self.i_intensify:
+                print('Intensifying')
+                x1 = self.mem_int.sample_random()
+            elif i == self.i_restart:
+                print('Restarting')
+                # Reduce step sizes and randomly select from medium-term
+                dx = dx * self.fac_restart
+                x1 = self.mem_med.sample_random()
+                i = 0
+            else:
+                x1 = ts.select_move(x0, y0, X, Y)
+                # if np.mod(i, self.i_pattern):
+                #     x1 = ts.pattern_move(x0, y0, x1, y1)
+
+            # Add chosen point to short-term list (tabu)
+            self.mem_short.add(x1)
+
+            # Update current point before next iteration
+            x0 = x1
+
+
+if __name__ == "__main__":
+
+    ts = TabuSearch(objective, constrain_input, 2, 2)
+
+    x0 = np.atleast_2d([0.5, 2.0])
+    dx = np.array([0.1, 0.1])
+
+    ts.search(x0, dx)
+
+    quit()
+
+
+    dx = np.array([0.1, 0.5])
+    dx_tol = dx / 64.0
 
     print("%d evals" % fevals)
     print(mem_med.npts)
     print(mem_long.npts)
     f, a = plt.subplots()
-    a.plot(mem_long.Y[: mem_long.npts, 0], mem_long.Y[: mem_long.npts, 1], ".")
-    a.plot(mem_med.Y[: mem_med.npts, 0], mem_med.Y[: mem_med.npts, 1], "o")
+    a.plot(mem_long.Y[:, 0], mem_long.Y[:, 1], ".")
+    a.plot(mem_med.Y[:, 0], mem_med.Y[:, 1], "o")
     a.set_xlim((0.1, 1.0))
     a.set_ylim((0.0, 10.0))
     plt.show()
