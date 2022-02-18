@@ -8,8 +8,8 @@ def hj_move(x, dx):
 
     For a design vector with M variables, return a 2MxM matrix, each variable
     having being perturbed by elementwise +/- dx."""
-    return x + np.concatenate((np.diag(dx), np.diag(-dx)))
-
+    d = np.diag(dx.flat)
+    return x + np.concatenate((d,-d))
 
 def objective(x):
     return np.stack((x[:, 0], (1.0 + x[:, 1]) / x[:, 0]), axis=1)
@@ -37,6 +37,14 @@ def constrain_bird(x):
     x, y = x[:,0],  x[:,1]
     return (x+5.)**2. + (y+5.)**2. < 25.
 
+def objective_schwefel(x):
+    return np.atleast_2d(np.sum(x*np.sin(np.sqrt(np.abs(x))),axis=-1)).T
+
+def constrain_schwefel(x):
+    return np.all(np.abs(x)<500.,axis=-1)
+
+
+
 def find_rows(A, B, atol=None):
     """Get matching rows in matrices A and B.
 
@@ -48,10 +56,10 @@ def find_rows(A, B, atol=None):
     A1 = np.expand_dims(A, 1)
 
     # NA by NB mem logical where all elements match
-    if atol:
-        b = np.isclose(A1, B, atol=atol).all(axis=-1)
-    else:
+    if atol is None:
         b = (A1 == B).all(axis=-1)
+    else:
+        b = np.isclose(A1, B, atol=atol).all(axis=-1)
 
     # A index is True where it matches any of the B points
     ind_A = b.any(axis=1)
@@ -66,13 +74,14 @@ def find_rows(A, B, atol=None):
 
 
 class Memory:
-    def __init__(self, nx, ny, max_points):
+    def __init__(self, nx, ny, max_points, tol=None):
         """Store a set of design vectors and their objective functions."""
 
         # Record inputs
         self.nx = nx
         self.ny = ny
         self.max_points = max_points
+        self.tol = np.array(tol)
 
         # Initialise points counter
         self.npts = 0
@@ -96,9 +105,14 @@ class Memory:
     def contains(self, Xtest):
         """Boolean index for each row in Xtest, True if x already in memory."""
         if self.npts:
-            return find_rows(Xtest, self._X[: self.npts])[0]
+            return find_rows(Xtest, self._X[: self.npts], self.tol)[0]
         else:
             return np.zeros((Xtest.shape[0],), dtype=bool)
+
+    def get(self, ind):
+        """Get the entry for a specific index."""
+        return self._X[ind], self._Y[ind]
+
 
     def add(self, xa, ya=None):
         """Add a point to the memory."""
@@ -195,6 +209,8 @@ class Memory:
         self._X[: self.npts] = Xall
         self._Y[: self.npts] = Yall
 
+        return np.any(self.contains(X))
+
 
     def generate_sparse(self, nregion):
         """Return a random design vector in a underexplored region."""
@@ -218,11 +234,14 @@ class Memory:
         i_select = np.random.choice(self.npts, 1)
         return self._X[i_select], self._Y[i_select]
 
-    def sample_sparse(self):
+    def sample_sparse(self, nregion):
         """Choose a design point from sparse region of the memory."""
 
+        # Randomly pick a component of x to bin
+        dirn = np.random.choice(self.nx)
+
         # Arbitrarily bin on first design variable
-        hX, bX = np.histogram(self._X[: self.npts, 0], 5)
+        hX, bX = np.histogram(self._X[: self.npts, dirn], nregion)
 
         # Override count in empty bins so we do not pick them
         hX[hX==0] = hX.max()+1
@@ -232,8 +251,8 @@ class Memory:
 
         # Logical indexes for chosen bin
         log_bin = np.logical_and(
-                self._X[:self.npts,0] >= bX[i_bin] ,
-                self._X[:self.npts,0] <= bX[i_bin+1]
+                self._X[:self.npts,dirn] >= bX[i_bin] ,
+                self._X[:self.npts,dirn] <= bX[i_bin+1]
                 )
         # Choose randomly from sparsest bin
         i_select = np.atleast_1d(np.random.choice(np.flatnonzero(log_bin)))
@@ -246,29 +265,32 @@ class Memory:
 
 
 class TabuSearch:
-    def __init__(self, objective, constraint, nx, ny):
+    def __init__(self, objective, constraint, nx, ny, tol):
         """Maximise an objective function using Tabu search."""
 
         # Store objective and constraint functions
         self.objective = objective
         self.constraint = constraint
 
+        # Store tolerance on x
+        self.tol  = tol
+
         # Default memory sizes
         self.n_short = 20
-        self.n_long = 2000
+        self.n_long = 20000
         self.nx = nx
         self.ny = ny
-        self.n_med = 1000
+        self.n_med = 2000 if ny>1 else 10
 
         # Default iteration counters
         self.i_diversify = 10
         self.i_intensify = 20
-        self.i_restart = 50
+        self.i_restart = 40
         self.i_pattern = 2
 
         # Misc algorithm parameters
-        self.x_regions = 2
-        self.max_fevals = 2000
+        self.x_regions = 3
+        self.max_fevals = 20000
         self.fac_restart = 0.5
         self.fac_pattern = 2.0
 
@@ -276,11 +298,10 @@ class TabuSearch:
         self.fevals = 0
 
         # Initialise memories
-        self.mem_short = Memory(nx, ny, self.n_short)
-        self.mem_med = Memory(nx, ny, self.n_med)
-        self.mem_long = Memory(nx, ny, self.n_long)
-        self.mem_int = Memory(nx, ny, self.n_med)
-        self.mem_all = (self.mem_short, self.mem_med, self.mem_long, self.mem_int)
+        self.mem_short = Memory(nx, ny, self.n_short, self.tol)
+        self.mem_med = Memory(nx, ny, self.n_med, self.tol)
+        self.mem_long = Memory(nx, ny, self.n_long, self.tol)
+        self.mem_all = (self.mem_short, self.mem_med, self.mem_long)
 
     def clear_memories(self):
         """Erase all memories"""
@@ -339,9 +360,6 @@ class TabuSearch:
             # If we have dominating points, randomly choose from them
             np.random.shuffle(i_dom)
             x1, y1 = X[i_dom[0]], Y[i_dom[0]]
-            # Put spare dominating points into intensification memory
-            if len(i_dom) > 1:
-                self.mem_int.update_front(X[i_dom[1:]], Y[i_dom[1:]])
         elif len(i_equiv) > 0:
             # Randomly choose from equivalent points
             np.random.shuffle(i_equiv)
@@ -368,13 +386,13 @@ class TabuSearch:
         else:
             return x1
 
-    def search(self, x0, dx, dx_min):
+    def search(self, x0, dx):
         """Perform a search with given intial point and step size."""
 
         y0 = ts.initial_guess(x0)
 
         i = 0
-        while self.fevals < self.max_fevals and np.any(dx > dx_min):
+        while self.fevals < self.max_fevals and np.any(dx > self.tol):
 
             # Evaluate objective for all permissible candidate moves
             X, Y = ts.evaluate_moves(x0, dx)
@@ -384,7 +402,10 @@ class TabuSearch:
 
             # Put Pareto-equivalent results into medium-term memory
             # Flag true if we sucessfully added a point
-            flag = self.mem_med.update_front(X, Y)
+            if self.ny==1:
+                flag = self.mem_med.update_best(X, Y)
+            else:
+                flag = self.mem_med.update_front(X, Y)
 
             # If we did not add to medium memory, increment local search counter
             if flag:
@@ -392,15 +413,19 @@ class TabuSearch:
             else:
                 i += 1
 
+
             # Choose next point based on local search counter
             if i == self.i_restart:
                 # Reduce step sizes and randomly select from medium-term
                 dx = dx * self.fac_restart
-                x1, y1 = self.mem_med.sample_sparse()
+                if self.ny==1:
+                    x1, y1 = self.mem_med.get(0)
+                else:
+                    x1, y1 = self.mem_med.sample_sparse(self.x_regions)
                 i = 0
-            elif i == self.i_intensify:
-                x1, y1 = self.mem_int.sample_sparse()
-            elif i == self.i_diversify or X.shape[0] == 0:
+            elif i == self.i_intensify or X.shape[0] == 0:
+                x1, y1 = self.mem_med.sample_sparse(self.x_regions)
+            elif i == self.i_diversify:
                 # Generate a new point in sparse design region,
                 # If we have reached i_diversify or all moves are tabu
                 x1 = self.mem_long.generate_sparse(self.x_regions)
@@ -424,35 +449,34 @@ class TabuSearch:
 
 if __name__ == "__main__":
 
-    ts = TabuSearch(objective_bird, constrain_bird, 2, 1)
     x0 = np.atleast_2d([-8.,-7.])
-    dx = np.array([2.0,2.0])
+    dx = np.ones(np.size(x0))*2.
+    ts = TabuSearch(objective_bird, constrain_bird, 2, 1, dx/64.)
 
-    x_opt, _ = ts.search(x0, dx, dx / 64.0)
-
-    x_real = np.atleast_2d([-3.1302468,-1.5821422])
-    print(x_opt)
-    print(np.abs(x_opt-x_real)/(0.1/32.))
+    x_opt, _ = ts.search(x0, dx)
 
 
     print("%d evals" % ts.fevals)
     print(ts.mem_med.npts)
-    print(ts.mem_int.npts)
     print(ts.mem_long.npts)
+
     f, a = plt.subplots()
     a.tricontourf(ts.mem_long.X[:, 0], ts.mem_long.X[:, 1],  ts.mem_long.Y[:, 0])
     a.plot(ts.mem_long.X[:, 0], ts.mem_long.X[:, 1], ".")
     a.set_xlim((-10, 0))
     a.set_ylim((-10, 0))
-    plt.show()
-    quit()
+
+    x0 = np.atleast_2d([.8,6.])
+    dx = np.array([0.1,1.])*2.
+    ts = TabuSearch(objective, constrain_input, 2, 2, dx/64.)
+    x_opt, _ = ts.search(x0, dx)
+
     print("%d evals" % ts.fevals)
     print(ts.mem_med.npts)
     print(ts.mem_long.npts)
     f, a = plt.subplots()
     a.plot(ts.mem_long.Y[:, 0], ts.mem_long.Y[:, 1], ".")
     a.plot(ts.mem_med.Y[:, 0], ts.mem_med.Y[:, 1], "o")
-    a.plot(ts.mem_int.Y[:, 0], ts.mem_int.Y[:, 1], "^")
     a.set_xlim((0.1, 1.0))
     a.set_ylim((0.0, 10.0))
     plt.show()
