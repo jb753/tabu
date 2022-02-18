@@ -94,8 +94,11 @@ class Memory:
 
     def add(self, xa, ya=None):
         """Add a point to the memory."""
+        xa = np.atleast_2d(xa)
         if ya is None:
             ya = xa
+        else:
+            ya = np.atleast_2d(ya)
 
         # Only add new points
         i_new = ~self.contains(xa)
@@ -137,7 +140,7 @@ class Memory:
         self.npts = n_keep
 
     def update_front(self, X, Y):
-        """Add or remove test points to maintain a Pareto front."""
+        """Add or remove points to maintain a Pareto front."""
         Yopt = self._Y[: self.npts]
 
         # Arrange the test points along a new dimension
@@ -166,6 +169,25 @@ class Memory:
 
         return flag
 
+    def update_best(self, X, Y):
+        """Add or remove points to keep the best N in memory."""
+
+        X, Y = np.atleast_2d(X), np.atleast_2d(Y)
+
+        # Join memory and test points into one matrix
+        Yall = np.concatenate((self._Y[: self.npts],Y),axis=0)
+        Xall = np.concatenate((self._X[: self.npts],X),axis=0)
+
+        # Sort by objective, truncate to maximum number of points
+        isort = np.argsort(Yall[:,0],axis=0)[:self.max_points]
+        Xall, Yall = Xall[isort], Yall[isort]
+
+        # Reassign to the memory
+        self.npts = len(isort)
+        self._X[: self.npts] = Xall
+        self._Y[: self.npts] = Yall
+
+
     def generate_sparse(self, nregion):
         """Return a random design vector in a underexplored region."""
 
@@ -188,9 +210,32 @@ class Memory:
         i_select = np.random.choice(self.npts, 1)
         return self._X[i_select], self._Y[i_select]
 
+    def sample_sparse(self):
+        """Choose a design point from sparse region of the memory."""
+
+        # Arbitrarily bin on first design variable
+        hX, bX = np.histogram(self._X[: self.npts, 0], 5)
+
+        # Override count in empty bins so we do not pick them
+        hX[hX==0] = hX.max()+1
+
+        # Choose sparsest bin, breaking ties randomly
+        i_bin = np.random.choice(np.flatnonzero(hX == hX.min()))
+
+        # Logical indexes for chosen bin
+        log_bin = np.logical_and(
+                self._X[:self.npts,0] >= bX[i_bin] ,
+                self._X[:self.npts,0] <= bX[i_bin+1]
+                )
+        # Choose randomly from sparsest bin
+        i_select = np.atleast_1d(np.random.choice(np.flatnonzero(log_bin)))
+
+        return self._X[i_select], self._Y[i_select]
+
     def clear(self):
         """Erase all points in memory."""
         self.npts = 0
+
 
 class TabuSearch:
     def __init__(self, objective, constraint, nx, ny):
@@ -208,7 +253,7 @@ class TabuSearch:
         self.ny = ny
 
         # Default iteration counters
-        self.i_diversify = 10
+        self.i_diversify = 5
         self.i_intensify = 20
         self.i_restart = 50
         self.i_pattern = 2
@@ -286,9 +331,8 @@ class TabuSearch:
             np.random.shuffle(i_dom)
             x1, y1 = X[i_dom[0]], Y[i_dom[0]]
             # Put spare dominating points into intensification memory
-            # TODO - should this be update_front?
             if len(i_dom) > 1:
-                self.mem_int.add(X[i_dom[1:]], Y[i_dom[1:]])
+                self.mem_int.update_front(X[i_dom[1:]], Y[i_dom[1:]])
         elif len(i_equiv) > 0:
             # Randomly choose from equivalent points
             np.random.shuffle(i_equiv)
@@ -298,7 +342,7 @@ class TabuSearch:
             np.random.shuffle(i_non_dom)
             x1, y1 = X[i_non_dom[0]], Y[i_non_dom[0]]
         else:
-            raise Exception('No valid points to pick next move from')
+            raise Exception("No valid points to pick next move from")
 
         # Keep in matrix form
         x1 = np.atleast_2d(x1)
@@ -321,10 +365,10 @@ class TabuSearch:
         y0 = ts.initial_guess(x0)
 
         i = 0
-        while self.fevals < self.max_fevals and np.any(dx>dx_min):
+        while self.fevals < self.max_fevals and np.any(dx > dx_min):
 
             # Evaluate objective for all permissible candidate moves
-            X, Y  = ts.evaluate_moves(x0, dx)
+            X, Y = ts.evaluate_moves(x0, dx)
 
             # Put new results into long-term memory
             self.mem_long.add(X, Y)
@@ -343,12 +387,12 @@ class TabuSearch:
             if i == self.i_restart:
                 # Reduce step sizes and randomly select from medium-term
                 dx = dx * self.fac_restart
-                x1, y1 = self.mem_med.sample_random()
+                x1, y1 = self.mem_med.sample_sparse()
                 i = 0
             elif i == self.i_intensify:
-                x1, y1 = self.mem_int.sample_random()
-            elif i == self.i_diversify or X.shape[0]==0:
-                # Generate a new point in sparse design region, 
+                x1, y1 = self.mem_int.sample_sparse()
+            elif i == self.i_diversify or X.shape[0] == 0:
+                # Generate a new point in sparse design region,
                 # If we have reached i_diversify or all moves are tabu
                 x1 = self.mem_long.generate_sparse(self.x_regions)
                 y1 = self.objective(x1)
@@ -368,19 +412,30 @@ class TabuSearch:
 
 if __name__ == "__main__":
 
-    ts = TabuSearch(objective, constrain_input, 2, 2)
+    ts = TabuSearch(objective, constrain_input, 1, 1)
 
-    x0 = np.atleast_2d([0.5, 2.0])
-    dx = np.array([0.1, 0.5])
+    x0 = 1.
+    y0 = 2.
 
-    ts.search(x0, dx, dx/64.)
+    ts.mem_med.add(1.,4.)
+    ts.mem_med.add(2.,3.)
+    ts.mem_med.add(3.,2.)
+    ts.mem_med.add(5.,2.)
+    ts.mem_med.update_best([[2.],[3.],[1.]],[[3.5],[5.],[1.]])
 
-    print("%d evals" % ts.fevals)
-    print(ts.mem_med.npts)
-    print(ts.mem_long.npts)
-    f, a = plt.subplots()
-    a.plot(ts.mem_long.Y[:, 0], ts.mem_long.Y[:, 1], ".")
-    a.plot(ts.mem_med.Y[:, 0], ts.mem_med.Y[:, 1], "o")
-    a.set_xlim((0.1, 1.0))
-    a.set_ylim((0.0, 10.0))
-    plt.show()
+
+    # x0 = np.atleast_2d([0.5, 2.0])
+    # dx = np.array([0.1, 0.5])
+
+    # ts.search(x0, dx, dx / 64.0)
+
+#     print("%d evals" % ts.fevals)
+#     print(ts.mem_med.npts)
+#     print(ts.mem_long.npts)
+#     f, a = plt.subplots()
+#     a.plot(ts.mem_long.Y[:, 0], ts.mem_long.Y[:, 1], ".")
+#     a.plot(ts.mem_med.Y[:, 0], ts.mem_med.Y[:, 1], "o")
+#     a.plot(ts.mem_int.Y[:, 0], ts.mem_int.Y[:, 1], "x")
+#     a.set_xlim((0.1, 1.0))
+#     a.set_ylim((0.0, 10.0))
+#     plt.show()
