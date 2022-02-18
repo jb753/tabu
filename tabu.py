@@ -29,6 +29,14 @@ def constrain_input(x):
     )
 
 
+def objective_bird(x):
+    x, y = x[:,(0,)],  x[:,(1,)]
+    return np.atleast_2d(np.sin(y)*np.exp((1.-np.cos(x))**2.)+np.cos(x)*np.exp((1.-np.sin(y))**2.) + (x-y)**2.)
+
+def constrain_bird(x):
+    x, y = x[:,0],  x[:,1]
+    return (x+5.)**2. + (y+5.)**2. < 25.
+
 def find_rows(A, B, atol=None):
     """Get matching rows in matrices A and B.
 
@@ -96,7 +104,7 @@ class Memory:
         """Add a point to the memory."""
         xa = np.atleast_2d(xa)
         if ya is None:
-            ya = xa
+            ya = np.empty((1,self.ny))
         else:
             ya = np.atleast_2d(ya)
 
@@ -247,13 +255,13 @@ class TabuSearch:
 
         # Default memory sizes
         self.n_short = 20
-        self.n_med = 1000
         self.n_long = 2000
         self.nx = nx
         self.ny = ny
+        self.n_med = 1000
 
         # Default iteration counters
-        self.i_diversify = 5
+        self.i_diversify = 10
         self.i_intensify = 20
         self.i_restart = 50
         self.i_pattern = 2
@@ -282,7 +290,8 @@ class TabuSearch:
     def initial_guess(self, x0):
         """Reset memories, set current point, evaluate objective."""
         self.clear_memories()
-        y0 = objective(x0)
+        y0 = self.objective(x0)
+        self.fevals += 1
         for mem in self.mem_all:
             mem.add(x0, y0)
         return y0
@@ -409,33 +418,41 @@ class TabuSearch:
             # Update current point before next iteration
             x0, y0 = x1, y1
 
+        # Return best point or Pareto front
+        return x0, y0
+
 
 if __name__ == "__main__":
 
-    ts = TabuSearch(objective, constrain_input, 1, 1)
+    ts = TabuSearch(objective_bird, constrain_bird, 2, 1)
+    x0 = np.atleast_2d([-8.,-7.])
+    dx = np.array([2.0,2.0])
 
-    x0 = 1.
-    y0 = 2.
+    x_opt, _ = ts.search(x0, dx, dx / 64.0)
 
-    ts.mem_med.add(1.,4.)
-    ts.mem_med.add(2.,3.)
-    ts.mem_med.add(3.,2.)
-    ts.mem_med.add(5.,2.)
-    ts.mem_med.update_best([[2.],[3.],[1.]],[[3.5],[5.],[1.]])
+    x_real = np.atleast_2d([-3.1302468,-1.5821422])
+    print(x_opt)
+    print(np.abs(x_opt-x_real)/(0.1/32.))
 
 
-    # x0 = np.atleast_2d([0.5, 2.0])
-    # dx = np.array([0.1, 0.5])
-
-    # ts.search(x0, dx, dx / 64.0)
-
-#     print("%d evals" % ts.fevals)
-#     print(ts.mem_med.npts)
-#     print(ts.mem_long.npts)
-#     f, a = plt.subplots()
-#     a.plot(ts.mem_long.Y[:, 0], ts.mem_long.Y[:, 1], ".")
-#     a.plot(ts.mem_med.Y[:, 0], ts.mem_med.Y[:, 1], "o")
-#     a.plot(ts.mem_int.Y[:, 0], ts.mem_int.Y[:, 1], "x")
-#     a.set_xlim((0.1, 1.0))
-#     a.set_ylim((0.0, 10.0))
-#     plt.show()
+    print("%d evals" % ts.fevals)
+    print(ts.mem_med.npts)
+    print(ts.mem_int.npts)
+    print(ts.mem_long.npts)
+    f, a = plt.subplots()
+    a.tricontourf(ts.mem_long.X[:, 0], ts.mem_long.X[:, 1],  ts.mem_long.Y[:, 0])
+    a.plot(ts.mem_long.X[:, 0], ts.mem_long.X[:, 1], ".")
+    a.set_xlim((-10, 0))
+    a.set_ylim((-10, 0))
+    plt.show()
+    quit()
+    print("%d evals" % ts.fevals)
+    print(ts.mem_med.npts)
+    print(ts.mem_long.npts)
+    f, a = plt.subplots()
+    a.plot(ts.mem_long.Y[:, 0], ts.mem_long.Y[:, 1], ".")
+    a.plot(ts.mem_med.Y[:, 0], ts.mem_med.Y[:, 1], "o")
+    a.plot(ts.mem_int.Y[:, 0], ts.mem_int.Y[:, 1], "^")
+    a.set_xlim((0.1, 1.0))
+    a.set_ylim((0.0, 10.0))
+    plt.show()
