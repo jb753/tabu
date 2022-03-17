@@ -1,7 +1,7 @@
 """Functions for multiobjective tabu search."""
 import numpy as np
 import matplotlib.pyplot as plt
-
+import os
 
 def hj_move(x, dx):
     """Generate a set of Hooke and Jeeves moves about a point.
@@ -12,8 +12,7 @@ def hj_move(x, dx):
     return x + np.concatenate((d,-d))
 
 def objective(x):
-    return np.stack((x[:, 0], (1.0 + x[:, 1]) / x[:, 0]), axis=1)
-
+    return np.column_stack((x[:, 0], (1.0 + x[:, 1]) / x[:, 0]))
 
 def constrain_input(x):
     return np.all(
@@ -105,7 +104,7 @@ class Memory:
     def contains(self, Xtest):
         """Boolean index for each row in Xtest, True if x already in memory."""
         if self.npts:
-            return find_rows(Xtest, self._X[: self.npts], self.tol)[0]
+            return find_rows(Xtest, self.X, self.tol)[0]
         else:
             return np.zeros((Xtest.shape[0],), dtype=bool)
 
@@ -144,7 +143,7 @@ class Memory:
         if np.any(~self.contains(Xtest)):
             raise ValueError("The requested points have not been previously evaluated")
 
-        return self._Y[: self.npts][find_rows(Xtest, self._X[: self.npts])[1]]
+        return self.Y[find_rows(Xtest, self.X)[1]]
 
     def delete(self, ind_del):
         """Remove points at given indexes."""
@@ -155,15 +154,15 @@ class Memory:
         n_keep = np.sum(b)
 
         # Reindex everything so that spaces appear at the end of memory
-        self._X[:n_keep] = self._X[: self.npts][b]
-        self._Y[:n_keep] = self._Y[: self.npts][b]
+        self._X[:n_keep] = self.X[b]
+        self._Y[:n_keep] = self.Y[b]
 
         # Update number of points
         self.npts = n_keep
 
     def update_front(self, X, Y):
         """Add or remove points to maintain a Pareto front."""
-        Yopt = self._Y[: self.npts]
+        Yopt = self.Y
 
         # Arrange the test points along a new dimension
         Y1 = np.expand_dims(Y, 1)
@@ -186,10 +185,8 @@ class Memory:
         # Add new points
         self.add(X[b_new_self], Y[b_new_self])
 
-        # Flag is true if we added new points
-        flag = np.sum(b_new_self) > 0
-
-        return flag
+        # Return true if we added at least one point
+        return (np.sum(b_new_self) > 0)
 
     def update_best(self, X, Y):
         """Add or remove points to keep the best N in memory."""
@@ -197,8 +194,8 @@ class Memory:
         X, Y = np.atleast_2d(X), np.atleast_2d(Y)
 
         # Join memory and test points into one matrix
-        Yall = np.concatenate((self._Y[: self.npts],Y),axis=0)
-        Xall = np.concatenate((self._X[: self.npts],X),axis=0)
+        Yall = np.concatenate((self.Y,Y),axis=0)
+        Xall = np.concatenate((self.X,X),axis=0)
 
         # Sort by objective, truncate to maximum number of points
         isort = np.argsort(Yall[:,0],axis=0)[:self.max_points]
@@ -220,7 +217,7 @@ class Memory:
         for i in range(self.nx):
 
             # Bin the design variable
-            hX, bX = np.histogram(self._X[: self.npts, i], nregion)
+            hX, bX = np.histogram(self.X[:, i], nregion)
 
             # Random value in least-visited bin
             bin_min = hX.argmin()
@@ -241,7 +238,7 @@ class Memory:
         dirn = np.random.choice(self.nx)
 
         # Arbitrarily bin on first design variable
-        hX, bX = np.histogram(self._X[: self.npts, dirn], nregion)
+        hX, bX = np.histogram(self.X[: , dirn], nregion)
 
         # Override count in empty bins so we do not pick them
         hX[hX==0] = hX.max()+1
@@ -251,8 +248,8 @@ class Memory:
 
         # Logical indexes for chosen bin
         log_bin = np.logical_and(
-                self._X[:self.npts,dirn] >= bX[i_bin] ,
-                self._X[:self.npts,dirn] <= bX[i_bin+1]
+                self.X[:,dirn] >= bX[i_bin] ,
+                self.X[:,dirn] <= bX[i_bin+1]
                 )
         # Choose randomly from sparsest bin
         i_select = np.atleast_1d(np.random.choice(np.flatnonzero(log_bin)))
@@ -386,13 +383,19 @@ class TabuSearch:
         else:
             return x1
 
-    def search(self, x0, dx):
+    def search(self, x0, dx, callback=None):
         """Perform a search with given intial point and step size."""
 
+        # Evaluate the objective at given initial guess point, update memories
         y0 = ts.initial_guess(x0)
 
+        # Main loop, until max evaluations reached or step size below tolerance
         i = 0
         while self.fevals < self.max_fevals and np.any(dx > self.tol):
+
+            # If we are given a callback, evaluate it now
+            if callback:
+                callback(self)
 
             # Evaluate objective for all permissible candidate moves
             X, Y = ts.evaluate_moves(x0, dx)
@@ -407,27 +410,26 @@ class TabuSearch:
             else:
                 flag = self.mem_med.update_front(X, Y)
 
-            # If we did not add to medium memory, increment local search counter
-            if flag:
-                i = 0
-            else:
-                i += 1
-
+            # Reset counter if we added to medium memory, otherwise increment 
+            i = 0 if flag else i+1
 
             # Choose next point based on local search counter
             if i == self.i_restart:
-                # Reduce step sizes and randomly select from medium-term
+                # RESTART: reduce step sizes and randomly select from
+                # medium-term
                 dx = dx * self.fac_restart
                 if self.ny==1:
+                    # Pick the current optimum if scalar objective
                     x1, y1 = self.mem_med.get(0)
                 else:
+                    # Pick from sparse region of Pareto from if multi-objective
                     x1, y1 = self.mem_med.sample_sparse(self.x_regions)
                 i = 0
             elif i == self.i_intensify or X.shape[0] == 0:
+                # INTENSIFY: Select a near-optimal point
                 x1, y1 = self.mem_med.sample_sparse(self.x_regions)
             elif i == self.i_diversify:
-                # Generate a new point in sparse design region,
-                # If we have reached i_diversify or all moves are tabu
+                # DIVERSIFY: Generate a new point in sparse design region
                 x1 = self.mem_long.generate_sparse(self.x_regions)
                 y1 = self.objective(x1)
             else:
@@ -443,11 +445,49 @@ class TabuSearch:
             # Update current point before next iteration
             x0, y0 = x1, y1
 
-        # Return best point or Pareto front
+        # After the loop return current point
         return x0, y0
 
+def setup_ax():
+    fig, ax = plt.subplots(figsize=(7.,4.))
+    ax.set_xlim((0.1,1.))
+    ax.set_ylim((0.,10.))
+    # Plot constraints
+    f1 = np.linspace(0.1,1.)
+    ax.plot(f1, 1./f1,'k--')
+    ax.plot(f1, 6./f1,'k--')
+    ax.plot(f1, np.ones_like(f1)*9.,'k--')
+    ax.plot(f1, 7./f1 - 9.,'k--')
+
+    ax.set_xlabel('Objective 1, $f_1$')
+    ax.set_ylabel('Objective 2, $f_2$')
+
+    ax.plot(np.nan,np.nan, ".", label='Long')
+    ax.plot(np.nan,np.nan, "o", label='Med')
+
+    ax.legend()
+    plt.tight_layout()
+
+    return fig, ax
+
+def write_frame(ts, ax):
+
+    ax.plot(ts.mem_long.Y[:, 0], ts.mem_long.Y[:, 1], ".", color='C0')
+    ax.plot(ts.mem_med.Y[:, 0], ts.mem_med.Y[:, 1], "o", color='C1')
+
+    fname_stub = 'fig%04d.png'
+    j = 0
+    while os.path.exists(fname_stub % j):
+        j += 1
+
+    plt.savefig(fname_stub % j, dpi=100)
+
+    ax.lines[-1].remove()
+    ax.lines[-1].remove()
+    print(j)
 
 if __name__ == "__main__":
+
 
     x0 = np.atleast_2d([-8.,-7.])
     dx = np.ones(np.size(x0))*2.
@@ -466,10 +506,17 @@ if __name__ == "__main__":
     a.set_xlim((-10, 0))
     a.set_ylim((-10, 0))
 
-    x0 = np.atleast_2d([.8,6.])
+    x0 = np.atleast_2d([.8,5.])
     dx = np.array([0.1,1.])*2.
     ts = TabuSearch(objective, constrain_input, 2, 2, dx/64.)
-    x_opt, _ = ts.search(x0, dx)
+
+    fig, ax = setup_ax()
+
+    def closure(ts):
+        write_frame(ts, ax)
+
+    x_opt, y_opt = ts.search(x0, dx, callback=closure)
+
 
     print("%d evals" % ts.fevals)
     print(ts.mem_med.npts)
