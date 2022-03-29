@@ -12,7 +12,9 @@ def hj_move(x, dx):
     return x + np.concatenate((d,-d))
 
 def objective(x):
-    return np.column_stack((x[:, 0], (1.0 + x[:, 1]) / x[:, 0]))
+    yy = np.column_stack((x[:, 0], (1.0 + x[:, 1]) / x[:, 0]))
+    yy[~constrain_input(x)] = np.nan
+    return yy
 
 def constrain_input(x):
     return np.all(
@@ -117,7 +119,7 @@ class Memory:
         """Add a point to the memory."""
         xa = np.atleast_2d(xa)
         if ya is None:
-            ya = np.empty((1,self.ny))
+            ya = np.empty((xa.shape[0],self.ny))
         else:
             ya = np.atleast_2d(ya)
 
@@ -400,8 +402,17 @@ class TabuSearch:
             # Evaluate objective for all permissible candidate moves
             X, Y = ts.evaluate_moves(x0, dx)
 
+            # If any objectives are NaN, add to tabu list
+            inan = np.isnan(Y).any(-1)
+            Xnan = X[inan]
+            self.mem_short.add(Xnan)
+
+            # Delete NaN from results
+            X, Y = X[~inan], Y[~inan]
+
             # Put new results into long-term memory
             self.mem_long.add(X, Y)
+
 
             # Put Pareto-equivalent results into medium-term memory
             # Flag true if we sucessfully added a point
@@ -488,34 +499,38 @@ def write_frame(ts, ax):
 
 if __name__ == "__main__":
 
+    def dummy_constraint(x):
+        return np.ones((len(x),),dtype=bool)
 
     x0 = np.atleast_2d([-8.,-7.])
     dx = np.ones(np.size(x0))*2.
     ts = TabuSearch(objective_bird, constrain_bird, 2, 1, dx/64.)
 
-    x_opt, _ = ts.search(x0, dx)
+    # x_opt, _ = ts.search(x0, dx)
 
 
-    print("%d evals" % ts.fevals)
-    print(ts.mem_med.npts)
-    print(ts.mem_long.npts)
+    # print("%d evals" % ts.fevals)
+    # print(ts.mem_med.npts)
+    # print(ts.mem_long.npts)
 
-    f, a = plt.subplots()
-    a.tricontourf(ts.mem_long.X[:, 0], ts.mem_long.X[:, 1],  ts.mem_long.Y[:, 0])
-    a.plot(ts.mem_long.X[:, 0], ts.mem_long.X[:, 1], ".")
-    a.set_xlim((-10, 0))
-    a.set_ylim((-10, 0))
+    # f, a = plt.subplots()
+    # a.tricontourf(ts.mem_long.X[:, 0], ts.mem_long.X[:, 1],  ts.mem_long.Y[:, 0])
+    # a.plot(ts.mem_long.X[:, 0], ts.mem_long.X[:, 1], ".")
+    # a.set_xlim((-10, 0))
+    # a.set_ylim((-10, 0))
 
     x0 = np.atleast_2d([.8,5.])
+
     dx = np.array([0.1,1.])*2.
-    ts = TabuSearch(objective, constrain_input, 2, 2, dx/64.)
+    # ts = TabuSearch(objective, constrain_input, 2, 2, dx/64.)
+    ts = TabuSearch(objective, dummy_constraint, 2, 2, dx/64.)
 
-    fig, ax = setup_ax()
+    # fig, ax = setup_ax()
 
-    def closure(ts):
-        write_frame(ts, ax)
-
-    x_opt, y_opt = ts.search(x0, dx, callback=closure)
+    # def closure(ts):
+    #     write_frame(ts, ax)
+    # x_opt, y_opt = ts.search(x0, dx, callback=closure)
+    x_opt, y_opt = ts.search(x0, dx)
 
 
     print("%d evals" % ts.fevals)
